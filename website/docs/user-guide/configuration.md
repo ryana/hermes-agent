@@ -191,9 +191,10 @@ Leaving these unset keeps the legacy defaults (`HERMES_API_TIMEOUT=1800`s, `HERM
 
 ### Background checks
 
-Passive update checks (CLI banner, TUI badge, dashboard, desktop app) ask the
-GitHub REST API for the tip of `main` and, when it differs from your checkout,
-the compare endpoint for the exact count and changelog. They never run
+Passive update checks (CLI banner, TUI badge, dashboard, desktop app) resolve the
+selected source channel through the GitHub REST API (`stable` releases or the tip
+of `main`) and, when it differs from your checkout, use the compare endpoint for
+the exact count and changelog. They never run
 `git fetch` — in a partial (`--filter=blob:none`) clone they also never
 download missing objects from the promisor remote (Git 2.44 or newer) — and
 every install asks at most **once per 24 hours** (a failed check
@@ -224,11 +225,17 @@ an override that permits prompting can still interrupt a background check.
 
 ```yaml
 updates:
+  minimum_release_age_days: 0  # Stable source releases must be this old before checks/updates offer them
   pre_update_backup: quick       # quick (state snapshot, default) | full (snapshot + HERMES_HOME zip) | off
   backup_keep: 5                 # Keep this many full pre-update backup zips
   non_interactive_local_changes: stash  # stash | discard
   auto_switch_parked_branch: true       # auto-switch a clean, fully merged parked branch back to main
 ```
+
+`minimum_release_age_days` is a supply-chain quarantine for managed source installs following
+`stable`. A positive integer makes passive notices, `hermes update --check`, and `hermes update`
+select the newest GitHub release published at least that many full days ago. It does not affect
+`main`, canary/preview channels, package managers, or the bundled Desktop application's updater.
 
 `pre_update_backup` is the single pre-update safety knob: `quick` (default) snapshots critical state files (pairing data, cron jobs, config, auth; files over 1 GiB are skipped) into `state-snapshots/`; `full` additionally zips all of `HERMES_HOME` into `backups/` and can add minutes on large homes; `off` disables both. Legacy booleans are honored (`true` → `full`, `false` → `off`).
 

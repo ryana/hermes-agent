@@ -18,7 +18,12 @@ import urllib.error
 import urllib.request
 
 from hermes_constants import get_hermes_home
-from hermes_cli.source_releases import OFFICIAL_REPOSITORY, _GITHUB_ORIGIN, resolve_source_target
+from hermes_cli.source_releases import (
+    OFFICIAL_REPOSITORY,
+    _GITHUB_ORIGIN,
+    minimum_release_age_days,
+    resolve_source_target,
+)
 
 logger = logging.getLogger(__name__)
 UPDATE_AVAILABLE_NO_COUNT = -1
@@ -432,7 +437,8 @@ def _hold_refused_release(result: dict, co: _Checkout, home: Path) -> None:
         result.update(updateAvailable=False, behind=0, held="downgrade", rollback=False)
 
 
-def _resolve_channel(result: dict, channel: str, co: _Checkout, *, forward_only: bool = False):
+def _resolve_channel(result: dict, channel: str, co: _Checkout, *, forward_only: bool = False,
+                     release_age_days: int = 0):
     """Resolve a release channel's target into ``result``; the SourceTarget, or None on error.
 
     A target with a pinned commit is final; one without names a branch to follow instead.
@@ -440,7 +446,8 @@ def _resolve_channel(result: dict, channel: str, co: _Checkout, *, forward_only:
     try:
         source_target = resolve_source_target(channel, [co.git] if not co.embedded else None, co.root,
                                               repository=co.repository or OFFICIAL_REPOSITORY,
-                                              forward_only=forward_only)
+                                              forward_only=forward_only,
+                                              minimum_release_age_days=release_age_days)
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         result.update(error="release-unavailable", message=f"Could not resolve the {channel} source channel: {exc}")
         return None
@@ -570,6 +577,7 @@ def check_for_updates(*, install_root: Path | None = None, home: Path | None = N
     if passive and (config.get("updates") or {}).get("check") is False:
         return {**result, "reason": "disabled"}
     channel = resolve_update_channel(config, root) if channel is None else validate_name(channel)
+    release_age_days = minimum_release_age_days(config)
     forward_only = rides_default_channel(channel_record(config, root), channel, root)
     co = _read_checkout(root, _installed_git(git), embedded)
     desktop_config = _read_json(branch_config_path) if branch_config_path else None
@@ -582,7 +590,7 @@ def check_for_updates(*, install_root: Path | None = None, home: Path | None = N
         result["branch"] = selected_branch
     identity = {"root": str(root), "home": str(home), "head": co.head, "origin": co.origin, "branch": selected_branch,
                 "channel": channel, "embedded": embedded, "branchOverride": branch is not None, "channelProtocol": 3,
-                "forwardOnly": forward_only}
+                "forwardOnly": forward_only, "minimumReleaseAgeDays": release_age_days}
     cache_file = Path(cache_path) if cache_path is not None else home / "source-checks" / f"{install_id(root)}.json"
     now = time.time()
     cached = None if force else _cached_status(cache_file, identity, now)
@@ -596,7 +604,10 @@ def check_for_updates(*, install_root: Path | None = None, home: Path | None = N
     if not _is_full_sha(co.head):
         result.update(error="head-unavailable", message="Could not read the installed revision.")
     elif branch is None:
-        source_target = _resolve_channel(result, channel, co, forward_only=forward_only)
+        source_target = _resolve_channel(
+            result, channel, co, forward_only=forward_only,
+            release_age_days=release_age_days,
+        )
         if source_target is not None and not source_target.commit:
             # The record supplies a default, not permission to leave the user's branch.
             selected_branch = configured_branch or _checked_out_branch(co.current_branch, source_target.branch)
