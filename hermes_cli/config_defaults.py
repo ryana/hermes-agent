@@ -2332,13 +2332,13 @@ DEFAULT_CONFIG = {
     "updates": {
         # Passive version/banner checks only; explicit `hermes update --check` remains enabled.
         "check": True,
+        "minimum_release_age_days": 0,
         # Pre-update backup. quick = snapshot small critical state (pairing JSONs, cron jobs,
         # config.yaml, .env, auth.json, profile DBs) into <HERMES_HOME>/state-snapshots/, skipping
         # files >1 GiB; restore via ``/snapshot``. full = quick PLUS a ``hermes backup`` zip in
         # <HERMES_HOME>/backups/ (``hermes import`` restores; slow on large homes; ``--backup``
         # forces once). off = none (``--no-backup`` forces once). Legacy booleans: true -> full,
-        # false -> off.
-        # Pre-update safety backup — ONE consolidated mechanism, three modes: Files over 1 GiB (e.g. a
+        # false -> off. Pre-update safety backup — ONE consolidated mechanism, three modes: Files over 1 GiB (e.g. a
         # bloated state.db) are skipped with a warning so the snapshot stays fast. This is the #48200
         # (wrong-path wipe) safety net.
         "pre_update_backup": "quick",
