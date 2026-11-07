@@ -91,14 +91,18 @@ def channel_compare_branch(selected_channel: str, git_cmd: list[str], root: Path
     cannot be resolved. An install riding its default channel only ever moves forward.
     """
     from hermes_cli.config import get_config_path, require_readable_config_before_write
-    from hermes_cli.source_releases import resolve_source_target
+    from hermes_cli.source_releases import minimum_release_age_days, resolve_source_target
     from hermes_cli.update_channel import channel_record, rides_default_channel
 
     print(f"→ Update channel: {selected_channel}")
-    record = channel_record(require_readable_config_before_write(get_config_path()), root)
+    config = require_readable_config_before_write(get_config_path())
+    record = channel_record(config, root)
     forward_only = rides_default_channel(record, selected_channel, root)
     try:
-        target = resolve_source_target(selected_channel, git_cmd, root, forward_only=forward_only)
+        target = resolve_source_target(
+            selected_channel, git_cmd, root, forward_only=forward_only,
+            minimum_release_age_days=minimum_release_age_days(config),
+        )
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         print(f"✗ Could not resolve the {selected_channel} source channel: {exc}")
         sys.exit(1)
@@ -239,7 +243,7 @@ def select_apply_target(args, branch: str, request: dict, *, git_cmd, stop) -> t
 
     from hermes_cli.config import require_readable_config_before_write
     from hermes_cli.release_channels import retrying_reads
-    from hermes_cli.source_releases import resolve_source_target
+    from hermes_cli.source_releases import minimum_release_age_days, resolve_source_target
     from hermes_cli.update_channel import channel_record, rides_default_channel
     from hermes_cli.update_cmd_common import _record_stop
 
@@ -247,13 +251,16 @@ def select_apply_target(args, branch: str, request: dict, *, git_cmd, stop) -> t
         return f"origin/{branch}", None, False, None
     root = _uc()._m().PROJECT_ROOT
     selected = _uc()._update_run_channel(args)
-    original = deepcopy(channel_record(require_readable_config_before_write(
-        Path(request["home"]) / "config.yaml"), root))
+    config = require_readable_config_before_write(Path(request["home"]) / "config.yaml")
+    original = deepcopy(channel_record(config, root))
     print(f"→ Update channel: {selected}")
     try:
         with retrying_reads():
-            target = resolve_source_target(selected, git_cmd, root,
-                                           forward_only=rides_default_channel(original, selected, root))
+            target = resolve_source_target(
+                selected, git_cmd, root,
+                forward_only=rides_default_channel(original, selected, root),
+                minimum_release_age_days=minimum_release_age_days(config),
+            )
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         print(f"✗ Could not resolve the {selected} source channel: {exc}. No update was applied.")
         stop()

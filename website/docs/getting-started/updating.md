@@ -121,6 +121,23 @@ hermes config set updates.check false
 
 This suppresses both cached update notices and passive update-check network requests. The default is `true`. Explicit `hermes update --check` and `hermes update` still work; this setting does not control the Desktop application's updater.
 
+### Delay newly published stable releases
+
+Managed source installs can quarantine new stable releases for a minimum number of days:
+
+```bash
+hermes config set updates.minimum_release_age_days 14
+```
+
+Passive notices, `hermes update --check`, and `hermes update` then select the newest stable
+GitHub release whose `published_at` time is at least 14 days old. Newer releases remain invisible
+to the source updater until they age into the policy. The default is `0` (no delay); the value must
+be a non-negative integer.
+
+The quarantine applies only to managed source installs following `stable`. It does not delay
+`main`, canary or preview channels, package-manager updates, or the bundled Desktop application's
+separate updater.
+
 ### What happens during an update
 
 For an admitted source checkout, `hermes update` runs these phases:

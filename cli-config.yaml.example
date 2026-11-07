@@ -2275,6 +2275,10 @@ updates:
   # Disable passive CLI/banner update checks with `hermes config set updates.check false`.
   # Explicit `hermes update --check` and `hermes update` remain available.
   check: true
+  # For managed source installs on the stable channel, only offer and install releases that have
+  # been published for at least this many days. 0 disables the quarantine. This does not delay
+  # main/canary, package-manager updates, or the bundled Desktop application's own updater.
+  minimum_release_age_days: 0
   # Backup taken before every `hermes update`:
   #   quick - snapshot of small critical state (pairing, cron jobs, config.yaml,
   #           .env, auth.json, profile databases) in state-snapshots/ (default)
