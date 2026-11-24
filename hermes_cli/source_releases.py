@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from html.parser import HTMLParser
 import json
 import logging
@@ -20,6 +21,19 @@ _GITHUB_ORIGIN = re.compile(
     r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?/?$", re.IGNORECASE,
 )
 _SHA = re.compile(r"[0-9a-f]{40}")
+
+
+def minimum_release_age_days(config: dict | None) -> int:
+    """Validated stable-release quarantine from a profile's config."""
+    updates = config.get("updates") if isinstance(config, dict) else None
+    value = updates.get("minimum_release_age_days", 0) if isinstance(updates, dict) else 0
+    return _validated_minimum_age(value)
+
+
+def _validated_minimum_age(value: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError("updates.minimum_release_age_days must be a non-negative integer")
+    return value
 
 
 def source_repository(git_cmd=None, cwd=None) -> str:
@@ -79,14 +93,18 @@ def _resolve_channel(name: str, repository: str):
 
 
 def resolve_source_target(channel: str, git_cmd=None, cwd=None, *, repository=None,
-                          forward_only: bool = False) -> SourceTarget:
+                          forward_only: bool = False, minimum_release_age_days: int = 0,
+                          now: datetime | None = None) -> SourceTarget:
     """Resolve a subscription: stable from GitHub releases, main from the git branch,
     preview channels (e.g. ``pm-preview``) through their R2 records.
 
     ``forward_only`` (an unchosen default subscription) pins a checkout that already
     contains the release to its own HEAD, so the update is a no-op instead of a downgrade.
     """
-    target = _resolve_source_target(channel, git_cmd, cwd, repository=repository)
+    target = _resolve_source_target(
+        channel, git_cmd, cwd, repository=repository,
+        minimum_release_age_days=minimum_release_age_days, now=now,
+    )
     if forward_only and target.commit and git_cmd is not None and cwd is not None:
         head = _head_containing(git_cmd, cwd, target.commit, target.repository)
         if head is not None and head != target.commit:
@@ -141,13 +159,21 @@ def _head_containing(git_cmd, cwd, commit: str, repository: str) -> str | None:
     return None if status in ("behind", "diverged") else head
 
 
-def _resolve_source_target(channel: str, git_cmd=None, cwd=None, *, repository=None) -> SourceTarget:
+def _resolve_source_target(channel: str, git_cmd=None, cwd=None, *, repository=None,
+                           minimum_release_age_days: int = 0,
+                           now: datetime | None = None) -> SourceTarget:
     from hermes_cli.release_channels import validate_name
 
     validate_name(channel)
+    minimum_release_age_days = _validated_minimum_age(minimum_release_age_days)
     repository = repository or source_repository(git_cmd, cwd)
     if channel == "stable":
-        return _resolve_stable(repository, git_cmd, cwd)
+        if minimum_release_age_days == 0 and now is None:
+            return _resolve_stable(repository, git_cmd, cwd)
+        return _resolve_stable(
+            repository, git_cmd, cwd,
+            minimum_release_age_days=minimum_release_age_days, now=now,
+        )
     if channel == "main":
         # main IS the git branch. No R2 record is read: none was ever published, and a
         # network that answers it with 403 instead of 404 (regional WAFs) must not stop
@@ -188,13 +214,20 @@ def _describe_release_failure(failure: BaseException) -> str:
     return f"No published stable release could be verified: {failure}"
 
 
-def _resolve_stable(repository: str, git_cmd=None, cwd=None) -> SourceTarget:
-    """Stable IS the repository's latest published GitHub release: the tag a release
-    publishes (non-draft, non-prerelease, strict vX.Y.Z), verified against origin.
-    No R2 record or pointer is consulted; publishing the release is the only promotion.
+def _resolve_stable(repository: str, git_cmd=None, cwd=None, *,
+                    minimum_release_age_days: int = 0,
+                    now: datetime | None = None) -> SourceTarget:
+    """Stable is the newest eligible published GitHub release, verified against origin.
+
+    Eligibility is non-draft, non-prerelease, strict vX.Y.Z, plus the configured
+    publication-age quarantine. No R2 record or pointer is consulted; publishing
+    the release and aging into policy are the only promotion steps.
     """
     try:
-        tag, commit = _resolve_release("stable", git_cmd, cwd, repository=repository, pointer=False)
+        tag, commit = _resolve_release(
+            "stable", git_cmd, cwd, repository=repository, pointer=False,
+            minimum_release_age_days=minimum_release_age_days, now=now,
+        )
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         logger.warning("Could not resolve the stable source release: %s", exc)
         raise ValueError(_describe_release_failure(exc)) from exc
@@ -285,6 +318,25 @@ def _published(release, channel: str) -> bool:
             and _valid_tag(release.get("tag_name"), channel))
 
 
+def _old_enough(release: dict, minimum_release_age_days: int, now: datetime | None) -> bool:
+    minimum_release_age_days = _validated_minimum_age(minimum_release_age_days)
+    if minimum_release_age_days == 0:
+        return True
+    published_at = release.get("published_at")
+    if not isinstance(published_at, str):
+        return False
+    try:
+        published = datetime.fromisoformat(published_at)
+    except ValueError:
+        return False
+    if published.tzinfo is None:
+        return False
+    current = now or datetime.now(UTC)
+    if current.tzinfo is None:
+        raise ValueError("now must include a timezone")
+    return (current - published).days >= minimum_release_age_days
+
+
 def _json(url: str):
     """GitHub API JSON with the updater's credential ladder (token, gh, anonymous).
 
@@ -296,8 +348,9 @@ def _json(url: str):
     return json.loads(_request(url))
 
 
-def _published_fallback(channel: str, base: str) -> dict:
-    if channel == "stable":
+def _published_fallback(channel: str, base: str, *, minimum_release_age_days: int = 0,
+                        now: datetime | None = None) -> dict:
+    if channel == "stable" and minimum_release_age_days == 0:
         release = _json(f"{base}/releases/latest")
         if _published(release, channel):
             return release
@@ -309,10 +362,15 @@ def _published_fallback(channel: str, base: str) -> dict:
             if not isinstance(entries, list):
                 break
             for release in entries:
-                if _published(release, channel):
+                if (_published(release, channel)
+                        and _old_enough(release, minimum_release_age_days, now)):
                     return release
             if len(entries) < 100:
                 break
+    if channel == "stable" and minimum_release_age_days:
+        raise ValueError(
+            f"No published stable release is at least {minimum_release_age_days} days old"
+        )
     raise ValueError(f"No published {channel} release")
 
 
@@ -338,16 +396,20 @@ def _release_pointer(channel: str) -> tuple[str | None, str | None]:
 
 
 def _resolve_release(channel: str, git_cmd=None, cwd=None, *, repository=None,
-                     pointer: bool = True) -> tuple[str, str]:
+                     pointer: bool = True, minimum_release_age_days: int = 0,
+                     now: datetime | None = None) -> tuple[str, str]:
     """``resolve_source_release`` that raises the failure instead of returning ``(None, None)``."""
     if channel not in ("stable", "canary"):
         raise ValueError(f"Not a release channel: {channel}")
     repository = repository or source_repository(git_cmd, cwd)
     base = f"https://api.github.com/repos/{repository}"
     tag, pinned_sha = (_release_pointer(channel)
-                       if pointer and repository.lower() == OFFICIAL_REPOSITORY.lower() else (None, None))
+                       if (pointer and minimum_release_age_days == 0
+                           and repository.lower() == OFFICIAL_REPOSITORY.lower()) else (None, None))
     if tag is None:
-        release = _published_fallback(channel, base)
+        release = _published_fallback(
+            channel, base, minimum_release_age_days=minimum_release_age_days, now=now,
+        )
         tag = release["tag_name"]
     else:
         release = _json(f"{base}/releases/tags/{tag}")
@@ -377,7 +439,8 @@ def _resolve_release(channel: str, git_cmd=None, cwd=None, *, repository=None,
 
 
 def resolve_source_release(channel: str, git_cmd=None, cwd=None, *, repository=None,
-                           pointer: bool = True) -> tuple[str | None, str | None]:
+                           pointer: bool = True, minimum_release_age_days: int = 0,
+                           now: datetime | None = None) -> tuple[str | None, str | None]:
     """Read published stable/canary release metadata (not channel discovery).
 
     The source updater's ``stable`` reads it with ``pointer=False``: GitHub's latest
@@ -388,7 +451,10 @@ def resolve_source_release(channel: str, git_cmd=None, cwd=None, *, repository=N
     resolve the same tag through GitHub's commit endpoint.
     """
     try:
-        return _resolve_release(channel, git_cmd, cwd, repository=repository, pointer=pointer)
+        return _resolve_release(
+            channel, git_cmd, cwd, repository=repository, pointer=pointer,
+            minimum_release_age_days=minimum_release_age_days, now=now,
+        )
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         logger.warning("Could not resolve the %s source release: %s", channel, exc)
         return None, None
